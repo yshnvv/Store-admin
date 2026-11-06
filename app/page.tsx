@@ -1,30 +1,32 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  clearStock,
   deleteMapping,
-  fetchFulfillmentRecords,
-  fetchFulfillmentStats,
   fetchMappings,
   fetchOzonProducts,
+  fetchStockStatus,
   fetchSupplierPurchased,
+  triggerStockSync,
   setMapping,
 } from '../lib/api';
 import type {
   DigitalCatalogItem,
   DigitalProductConfig,
-  FulfillmentRecord,
-  FulfillmentStats,
   OzonProduct,
   StoredMapping,
+  StockSyncResult,
   SupplierType,
 } from '../types';
-import { Badge, Button, Card, Input, Select } from '../components/ui';
+import { Badge, Button, Card, Select } from '../components/ui';
 
-type Tab = 'binding' | 'statistics';
+type Tab = 'binding' | 'stock';
 
 export default function CatalogBindingPage() {
   const [tab, setTab] = useState<Tab>('binding');
+  const [userRole, setUserRole] = useState<'admin' | 'manager' | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
 
   // --- Binding tab state ---
   const [ozonProducts, setOzonProducts] = useState<OzonProduct[]>([]);
@@ -43,13 +45,11 @@ export default function CatalogBindingPage() {
   const [removingAll, setRemovingAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // --- Statistics tab state ---
-  const [loadingStats, setLoadingStats] = useState(false);
-  const [stats, setStats] = useState<FulfillmentStats | null>(null);
-  const [fulfillmentRecords, setFulfillmentRecords] = useState<
-    FulfillmentRecord[]
-  >([]);
-  const [loadingRecords, setLoadingRecords] = useState(false);
+  // --- Stock tab state ---
+  const [stockMappings, setStockMappings] = useState<StoredMapping[]>([]);
+  const [stockStatus, setStockStatus] = useState<StockSyncResult | null>(null);
+  const [loadingStock, setLoadingStock] = useState(false);
+  const [clearingStock, setClearingStock] = useState(false);
 
   const supplierItemById = useMemo(() => {
     const map = new Map<string, DigitalCatalogItem>();
@@ -119,10 +119,13 @@ export default function CatalogBindingPage() {
       setError('Supplier article not found');
       return;
     }
+    const ozonProduct = ozonProducts.find((p) => p.offer_id === offerId);
+    const ozonProductId = ozonProduct?.product_id ? Number(ozonProduct.product_id) : undefined;
+    const ozonSku = ozonProduct?.sku;
     setBinding((prev) => new Set([...prev, offerId]));
     setError(null);
     try {
-      const config = buildConfig(item);
+      const config = buildConfig(item, ozonProductId, ozonSku);
       await setMapping(offerId, config);
       await loadMappings();
       setSelectedSupplierItemByOzon((prev) => {
@@ -171,50 +174,114 @@ export default function CatalogBindingPage() {
     }
   };
 
-  /* ── statistics ── */
+  /* ── stock ── */
 
-  const fetchStats = useCallback(async () => {
-    setLoadingStats(true);
+  const loadStock = useCallback(async () => {
+    setLoadingStock(true);
+    setError(null);
     try {
-      const s = await fetchFulfillmentStats();
-      setStats(s ?? null);
+      const [mappings, status] = await Promise.all([
+        fetchMappings(),
+        fetchStockStatus(),
+      ]);
+      setStockMappings(mappings ?? []);
+      setStockStatus(status?.lastResult ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load stats');
+      setError(err instanceof Error ? err.message : 'Failed to load stock');
     } finally {
-      setLoadingStats(false);
+      setLoadingStock(false);
     }
   }, []);
 
-  const fetchRecords = useCallback(async () => {
-    setLoadingRecords(true);
+  const handleStockSync = async () => {
+    setLoadingStock(true);
+    setError(null);
     try {
-      const rs = await fetchFulfillmentRecords();
-      setFulfillmentRecords(rs ?? []);
+      const result = await triggerStockSync();
+      setStockStatus(result);
+      await loadStock();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load fulfillment records');
+      setError(err instanceof Error ? err.message : 'Stock sync failed');
     } finally {
-      setLoadingRecords(false);
+      setLoadingStock(false);
+    }
+  };
+
+  const handleClearStock = async () => {
+    if (!window.confirm('Clear last-pushed-stock on all mappings? This will make every product show as "Needs shop update" until the next sync.')) return;
+    setClearingStock(true);
+    setError(null);
+    try {
+      await clearStock();
+      setError(null);
+      await loadStock();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to clear stock');
+    } finally {
+      setClearingStock(false);
+    }
+  };
+
+  // Load the current user's role so we can hide admin-only tabs.
+  const loadAuth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/auth/me', { cache: 'no-store' });
+      if (res.ok) {
+        const data = await res.json();
+        setUserRole(data.role);
+      } else {
+        setUserRole(null);
+      }
+    } catch {
+      setUserRole(null);
+    } finally {
+      setAuthLoading(false);
     }
   }, []);
+
+  const allowedTabs = useMemo< Tab[]>(() => {
+    if (!userRole) return ['binding'];
+    if (userRole === 'admin') return ['binding', 'stock'];
+    return ['binding']; // manager: bindings only
+  }, [userRole]);
+
+  // Redirect to the first allowed tab if the current one isn't accessible.
+  useEffect(() => {
+    if (userRole !== null && !allowedTabs.includes(tab as Tab)) {
+      setTab(allowedTabs[0]);
+    }
+  }, [userRole, allowedTabs, tab]);
+
+  // Load everything needed to render the bindings tab on page load.
+  useEffect(() => {
+    loadAuth();
+    loadMappings();
+    fetchOzon();
+    fetchSupplier();
+  }, [loadAuth, loadMappings, fetchOzon, fetchSupplier]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
       {/* Tabs */}
       <div className="flex gap-2 mb-6 border-b border-gray-200 pb-2">
-        <Button
-          onClick={() => setTab('binding')}
-          active={tab === 'binding'}
-          variant="secondary"
-        >
-          Bind articles
-        </Button>
-        <Button
-          onClick={() => setTab('statistics')}
-          active={tab === 'statistics'}
-          variant="secondary"
-        >
-          Statistics
-        </Button>
+        {allowedTabs.includes('binding') && (
+          <Button
+            onClick={() => setTab('binding')}
+            active={tab === 'binding'}
+            variant="secondary"
+          >
+            Bindings
+          </Button>
+        )}
+        {allowedTabs.includes('stock') && (
+          <Button
+            onClick={() => setTab('stock')}
+            active={tab === 'stock'}
+            variant="secondary"
+          >
+            Stock
+          </Button>
+        )}
       </div>
 
       {tab === 'binding' ? (
@@ -311,7 +378,7 @@ export default function CatalogBindingPage() {
                 <tbody>
                   {ozonProducts.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="text-center text-gray-500 py-6">
+                      <td colSpan={5} className="text-center text-gray-500 py-6">
                         No Ozon articles fetched yet. Click "Fetch Ozon articles".
                       </td>
                     </tr>
@@ -434,13 +501,14 @@ export default function CatalogBindingPage() {
                     <th className="w-1/3">Ozon product</th>
                     <th className="w-1/3">FazerCards article</th>
                     <th className="w-1/6">Type</th>
+                    <th className="w-1/6">Ozon productId</th>
                     <th className="w-1/6">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {mappings.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="text-center text-gray-500 py-4">
+                      <td colSpan={5} className="text-center text-gray-500 py-4">
                         No mappings in database yet.
                       </td>
                     </tr>
@@ -464,6 +532,11 @@ export default function CatalogBindingPage() {
                             <Badge variant="fzr">{cfg.type}</Badge>
                           </td>
                           <td>
+                            <div className="text-sm font-mono text-gray-600">
+                              {cfg.productId ?? '—'}
+                            </div>
+                          </td>
+                          <td>
                             <Button
                               onClick={() => unbind(m.ozonOfferId)}
                               variant="ghost"
@@ -484,139 +557,164 @@ export default function CatalogBindingPage() {
         </>
       ) : (
         <>
-          {/* Statistics */}
+          {/* Stock */}
           <Card className="mb-6">
             <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
-              <h3 className="font-semibold text-gray-800">Sell statistics</h3>
+              <h3 className="font-semibold text-gray-800">Inventory by shop</h3>
               <div className="flex gap-2">
                 <Button
-                  onClick={fetchStats}
-                  loading={loadingStats}
-                  disabled={loadingStats}
+                  onClick={loadStock}
+                  loading={loadingStock}
+                  disabled={loadingStock}
                   variant="ghost"
                   size="sm"
                 >
-                  Refresh stats
+                  Refresh
                 </Button>
                 <Button
-                  onClick={fetchRecords}
-                  loading={loadingRecords}
-                  disabled={loadingRecords}
-                  variant="ghost"
+                  onClick={handleStockSync}
+                  loading={loadingStock}
+                  disabled={loadingStock}
+                  variant="primary"
                   size="sm"
                 >
-                  Refresh records
+                  {loadingStock ? 'Syncing…' : 'Sync stock now'}
+                </Button>
+                <Button
+                  onClick={handleClearStock}
+                  loading={clearingStock}
+                  disabled={clearingStock}
+                  variant="danger"
+                  size="sm"
+                >
+                  {clearingStock ? 'Clearing…' : 'Clear stock'}
                 </Button>
               </div>
             </div>
             <div className="p-4">
-              {stats ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              {stockStatus ? (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
                   <StatCard
-                    title="Total sells"
-                    value={stats.total}
-                    subtitle="Fulfillment records"
+                    title="Mappings evaluated"
+                    value={stockStatus.totalMappings}
+                    subtitle="Ozon → FazerCards mappings"
                     variant="blue"
                   />
                   <StatCard
-                    title="Completed"
-                    value={stats.completed}
-                    subtitle="Delivered to buyer"
+                    title="With FazerCards stock"
+                    value={stockStatus.mappingsWithStock}
+                    subtitle="Products found in supplier catalog"
+                    variant="green"
+                  />
+                  <StatCard
+                    title="Pushed to Ozon"
+                    value={stockStatus.updatedCount}
+                    subtitle="Stock updates sent to shop"
                     variant="green"
                   />
                   <StatCard
                     title="Failed"
-                    value={stats.failed}
-                    subtitle="Failed fulfillments"
+                    value={stockStatus.failedCount}
+                    subtitle="Failed stock updates"
                     variant="red"
-                  />
-                  <StatCard
-                    title="Success rate"
-                    value={`${stats.successRate}%`}
-                    subtitle="Completed / terminal"
-                    variant="purple"
                   />
                 </div>
               ) : (
                 <div className="text-gray-500 text-sm py-4">
-                  No stats yet. Click "Refresh stats".
+                  No stock data yet. Click "Refresh" or "Sync stock now".
+                </div>
+              )}
+              {stockStatus?.errors?.length && (
+                <div className="mb-4 p-3 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm">
+                  <h4 className="font-semibold mb-1">Errors</h4>
+                  <ul className="list-disc list-inside space-y-1">
+                    {stockStatus.errors.map((e, i) => (
+                      <li key={i}>
+                        {e.ozonOfferId ? `${e.ozonOfferId}: ` : ''}{e.message}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>
           </Card>
 
-          {/* Fulfillment records table */}
           <Card>
             <div className="px-4 py-3 border-b border-gray-200">
               <h3 className="font-semibold text-gray-800">
-                Recent fulfillment records
+                Stock by product (FazerCards → Ozon)
               </h3>
             </div>
-            <div className="overflow-x-auto">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th className="w-1/5">Posting number</th>
-                    <th className="w-1/6">Offer ID</th>
-                    <th className="w-1/6">Status</th>
-                    <th className="w-1/6">FZ order</th>
-                    <th className="w-1/6">Created</th>
-                    <th className="w-1/6">Error</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {fulfillmentRecords.length === 0 ? (
+            <div className="overflow-x-auto p-4">
+              {stockMappings.length === 0 ? (
+                <div className="text-center text-gray-500 py-6">
+                  No mappings yet. Create one at the catalog bindings page.
+                </div>
+              ) : (
+                <table className="w-full text-sm border-collapse">
+                  <thead>
                     <tr>
-                      <td colSpan={6} className="text-center text-gray-500 py-4">
-                        No fulfillment records yet.
-                      </td>
+                      <th className="text-left pb-2 text-gray-500">
+                        Ozon product
+                      </th>
+                      <th className="text-left pb-2 text-gray-500">
+                        FazerCards article
+                      </th>
+                      <th className="text-left pb-2 text-gray-500 w-32">
+                        Type
+                      </th>
+                      <th className="text-left pb-2 text-gray-500 w-32">
+                        FazerCards stock
+                      </th>
+                      <th className="text-left pb-2 text-gray-500 w-40">
+                        Last pushed to Ozon
+                      </th>
+                      <th className="text-left pb-2 text-gray-500 w-24">
+                        Shop status
+                      </th>
                     </tr>
-                  ) : (
-                    fulfillmentRecords
-                      .slice()
-                      .sort(
-                        (a, b) =>
-                          new Date(b.createdAt).getTime() -
-                          new Date(a.createdAt).getTime(),
-                      )
-                      .slice(0, 20)
-                      .map((r) => (
-                        <tr key={r.ozonPostingNumber}>
-                          <td>
-                            <div className="font-medium text-gray-800 truncate">
-                              {r.ozonPostingNumber}
-                            </div>
+                  </thead>
+                  <tbody>
+                    {stockMappings.map((m) => {
+                      const cfg = m.fazercardsConfig as any;
+                      const stock = cfg?.stock;
+                      const pushed = cfg?.ozonLastPushedStock;
+                      const inSync = stock === pushed;
+                      const outOfStock = stock === 0;
+                      return (
+                        <tr key={m.id}>
+                          <td className="pb-1 font-medium text-gray-800 truncate max-w-xs">
+                            {m.ozonOfferId}
                           </td>
-                          <td>
-                            <div className="text-sm text-gray-600 truncate max-w-xs">
-                              {r.ozonOfferId ?? '—'}
-                            </div>
+                          <td className="pb-1 text-gray-700 truncate max-w-xs">
+                            {cfg?.name ?? cfg?.catalogId ?? '—'}
                           </td>
-                          <td>
-                            <Badge variant={statusBadgeVariant(r.fulfillmentStatus)}>
-                              {r.fulfillmentStatus}
-                            </Badge>
+                          <td className="pb-1 text-gray-600">
+                            <Badge variant="fzr">{cfg?.type ?? '—'}</Badge>
                           </td>
-                          <td>
-                            <div className="text-sm text-gray-600 truncate max-w-xs">
-                              {r.supplierOrder?.orderId ?? '—'}
-                            </div>
+                          <td className="pb-1 font-mono text-gray-800">
+                            {stock === undefined ? '—' : stock}
                           </td>
-                          <td>
-                            <div className="text-xs text-gray-500">
-                              {new Date(r.createdAt).toLocaleString()}
-                            </div>
+                          <td className="pb-1 font-mono text-gray-600">
+                            {pushed ?? '—'}
                           </td>
-                          <td>
-                            <div className="text-xs text-red-600 truncate max-w-xs">
-                              {r.error ?? '—'}
-                            </div>
+                          <td className="pb-1">
+                            {stock === undefined ? (
+                              <Badge variant="ozon">Not in supplier catalog</Badge>
+                            ) : outOfStock ? (
+                              <Badge variant="ozon">Out of stock</Badge>
+                            ) : inSync ? (
+                              <Badge variant="used">In sync with shop</Badge>
+                            ) : (
+                              <Badge variant="new">Needs shop update</Badge>
+                            )}
                           </td>
                         </tr>
-                      ))
-                  )}
-                </tbody>
-              </table>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
           </Card>
         </>
@@ -627,6 +725,8 @@ export default function CatalogBindingPage() {
 
 function buildConfig(
   item: DigitalCatalogItem,
+  productId?: number,
+  sku?: string | number,
 ): DigitalProductConfig {
   const config: DigitalProductConfig = {
     supplier: item.supplier,
@@ -637,6 +737,8 @@ function buildConfig(
     name: item.name,
     priceUsd: item.priceUsd,
     stock: item.stock,
+    productId,
+    sku,
     config: item.config,
   };
   return config;
@@ -666,20 +768,4 @@ function StatCard({
       <div className="text-xs text-opacity-60 mt-1">{subtitle}</div>
     </div>
   );
-}
-
-function statusBadgeVariant(status: string): 'ozon' | 'fzr' | 'used' | 'new' {
-  switch (status) {
-    case 'completed':
-    case 'ozon_shipped':
-    case 'delivered_to_buyer':
-    case 'key_bought':
-      return 'used';
-    case 'failed':
-      return 'ozon';
-    case 'buying_key':
-      return 'new';
-    default:
-      return 'fzr';
-  }
 }

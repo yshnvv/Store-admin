@@ -1,16 +1,23 @@
 import {
   DigitalCatalogItem,
   DigitalProductConfig,
-  FulfillmentRecord,
-  FulfillmentStats,
   OzonProduct,
   StoredMapping,
   SupplierType,
+  StockSyncResult,
+  KeyBuyStatus,
+  KeyBuyRunResult,
+  KeyBuyArticleStock,
+  KeyBuyConfigUpdate,
+  FulfillmentRunResult,
+  DigitalPostingView,
+  PollingResult,
+  PollingStatus,
 } from '../types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
-/** Thin wrapper around the backend catalog endpoints. */
+/** Thin wrapper around the backend endpoints. */
 export async function fetchJson<T>(
   path: string,
   init?: RequestInit,
@@ -81,12 +88,134 @@ export async function deleteMapping(ozonOfferId: string) {
   );
 }
 
-/** Fulfillment statistics. */
-export async function fetchFulfillmentStats() {
-  return fetchJson<FulfillmentStats>('/fulfillment/stats');
+/** Manually trigger a stock sync (FazerCards → Ozon). */
+export async function triggerStockSync() {
+  return fetchJson<StockSyncResult>('/admin/stock/sync', { method: 'POST' });
 }
 
-/** All fulfillment records (sells). */
-export async function fetchFulfillmentRecords() {
-  return fetchJson<FulfillmentRecord[]>('/fulfillment');
+/** Disable the stock-sync cron (pause auto-sync). */
+export async function pauseStockSync() {
+  return fetchJson<{ enabled: boolean }>('/admin/stock/pause', {
+    method: 'POST',
+  });
+}
+
+/** Enable the stock-sync cron (resume auto-sync). */
+export async function resumeStockSync() {
+  return fetchJson<{ enabled: boolean }>('/admin/stock/resume', {
+    method: 'POST',
+  });
+}
+
+/** Last stock-sync result. */
+export async function fetchStockStatus() {
+  return fetchJson<{ lastResult: StockSyncResult | null; enabled: boolean }>(
+    '/admin/stock/status',
+  );
+}
+
+/** Clear the last-pushed-stock tracking on all mappings so they re-sync. */
+export async function clearStock() {
+  return fetchJson<{ cleared: number }>('/admin/stock/clear', {
+    method: 'POST',
+  });
+}
+
+/* ─────────────────────────────
+   Key-buy cronjob API
+   ───────────────────────────── */
+
+/** Key-buy cronjob status + config + last run result. */
+export async function fetchKeyBuyStatus() {
+  return fetchJson<KeyBuyStatus>('/admin/key-buy/status');
+}
+
+/** Per-article available stock vs target stock. */
+export async function fetchKeyBuyArticles() {
+  return fetchJson<KeyBuyArticleStock[]>('/admin/key-buy/articles');
+}
+
+/** Manually trigger a key-buy cycle now. */
+export async function triggerKeyBuy() {
+  return fetchJson<KeyBuyRunResult>('/admin/key-buy/trigger', {
+    method: 'POST',
+  });
+}
+
+/** Disable the key-buy cron (off by default). */
+export async function pauseKeyBuy() {
+  return fetchJson<{ enabled: boolean }>('/admin/key-buy/pause', {
+    method: 'POST',
+  });
+}
+
+/** Enable the key-buy cron. */
+export async function resumeKeyBuy() {
+  return fetchJson<{ enabled: boolean }>('/admin/key-buy/resume', {
+    method: 'POST',
+  });
+}
+
+/** Update key-buy cron config (interval, max buy per run, target stock). */
+export async function updateKeyBuyConfig(body: KeyBuyConfigUpdate) {
+  return fetchJson<KeyBuyStatus>('/admin/key-buy/config', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+/* ─────────────────────────────
+   Fulfillment API
+   ───────────────────────────── */
+
+/** Manually fulfill a specific posting. */
+export async function fulfillPosting(
+  postingNumber: string,
+  products: Array<{ offer_id: string; sku: number | string; required_qty_for_digital_code: number; quantity: number }>,
+) {
+  return fetchJson<FulfillmentRunResult>(
+    `/admin/fulfillment/fulfill/${encodeURIComponent(postingNumber)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ products }),
+    },
+  );
+}
+
+/** List pending digital postings. */
+export async function fetchFulfillmentPostings() {
+  return fetchJson<DigitalPostingView[]>('/admin/fulfillment/postings');
+}
+
+/** Get a single digital posting. */
+export async function fetchFulfillmentPosting(postingNumber: string) {
+  return fetchJson<DigitalPostingView>(
+    `/admin/fulfillment/postings/${encodeURIComponent(postingNumber)}`,
+  );
+}
+
+/** Trigger a digital posting poll cycle. */
+export async function triggerPolling() {
+  return fetchJson<PollingResult>('/admin/fulfillment/poll/trigger', {
+    method: 'POST',
+  });
+}
+
+/** Get polling status. */
+export async function fetchPollingStatus() {
+  return fetchJson<PollingStatus>('/admin/fulfillment/poll/status');
+}
+
+/** Pause automatic polling (stop fulfillment cycle). */
+export async function pausePolling() {
+  return fetchJson<{ enabled: boolean }>('/admin/fulfillment/poll/pause', {
+    method: 'POST',
+  });
+}
+
+/** Resume automatic polling (start fulfillment cycle). */
+export async function resumePolling() {
+  return fetchJson<{ enabled: boolean }>('/admin/fulfillment/poll/resume', {
+    method: 'POST',
+  });
 }

@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Builds
+.next/
+out/
+
+# Environment
+.env.local
+.env.production
+.env.development
+
+# Git
+.git
+.gitignore
+
+# Logs
+*.log
+npm-debug.log*
